@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CSE Attendance</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#eef1f6;color:#10263f}
+#app{max-width:640px;margin:0 auto;padding:16px}
+h1{margin:0 0 12px;font-size:24px}h2{margin:0 0 12px;font-size:19px}
+.card{background:#fff;border:1px solid #d9dfe8;border-radius:20px;padding:18px;margin:14px 0}
+label{display:block;margin:12px 0 4px;color:#5b6b7f;font-size:14px}
+input,select{width:100%;padding:13px;border:1px solid #d9dfe8;border-radius:12px;background:#eef1f6;font-size:16px;color:#10263f}
+button{padding:12px 18px;border:0;border-radius:12px;background:#0f7b6c;color:#fff;font-size:16px;cursor:pointer;margin-top:14px}
+button.ghost{background:#fff;color:#10263f;border:1px solid #d9dfe8;margin-top:0}
+button.del{background:#b3261e;margin-top:0;padding:8px 12px;font-size:14px}
+button.sm{margin-top:0;padding:8px 12px;font-size:14px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.pill{border:1px solid #d9dfe8;border-radius:999px;padding:8px 14px;background:#fff;font-size:15px}
+.tabs{display:flex;gap:8px;margin-top:14px}
+.tabs button{flex:1;margin:0;background:#fff;color:#10263f;border:1px solid #d9dfe8}
+.tabs button.on{background:#10263f;color:#fff}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-top:1px solid #eef1f6;font-size:15px}
+.item:first-child{border-top:0}
+.muted{color:#5b6b7f}
+.msg{margin-top:10px;font-size:15px}.msg.err{color:#b3261e}.msg.ok{color:#0f7b6c}
+.code{font-family:ui-monospace,Menlo,monospace;font-size:44px;letter-spacing:8px;text-align:center;margin:10px 0}
+.on-dot{color:#0f7b6c;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:7px 4px;border-top:1px solid #eef1f6}
+</style>
+</head>
+<body>
+<div id="app"><div class="card">Loading… (the server may take up to a minute to wake up)</div></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const opts = (arr, sel) => arr.map(v => `<option${v === sel ? " selected" : ""}>${esc(v)}</option>`).join("");
+const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+const TIMES = []; for (let h = 7; h <= 20; h++) for (const m of ["00","30"]) TIMES.push(String(h).padStart(2,"0") + ":" + m);
+const fmt = iso => new Date(iso + "Z").toLocaleString();
+let me = null, meta = {years: [], divs: {}}, timer = null, asg = [];
+
+async function api(path, method = "GET", body) {
+  const r = await fetch(path, {method, credentials: "same-origin",
+    headers: {"Content-Type": "application/json"}, body: body ? JSON.stringify(body) : undefined});
+  let d = null; try { d = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error((d && d.error) || ("Request failed (" + r.status + ")"));
+  return d;
+}
+function msg(id, t, ok) { const e = $("#" + id); if (e) { e.textContent = t; e.className = "msg " + (ok ? "ok" : "err"); } }
+function stopTimer() { clearInterval(timer); timer = null; }
+
+async function boot() {
+  try { meta = await api("/api/meta"); } catch (e) {}
+  try { me = await api("/api/me"); } catch (e) { me = null; }
+  me ? home() : loginView();
+}
+
+/* ---------- login ---------- */
+function loginView() {
+  stopTimer();
+  $("#app").innerHTML = `<div class="card"><h1>CSE Attendance</h1>
+    <label>Role</label><select id="lr"><option value="student">Student</option><option value="professor">Professor</option><option value="admin">Admin</option></select>
+    <label>ID</label><input id="li" autocapitalize="off" autocomplete="username">
+    <label>Password</label><input id="lp" type="password" autocomplete="current-password">
+    <button onclick="doLogin()">Sign in</button><div id="lm" class="msg"></div></div>`;
+  $("#lp").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+}
+async function doLogin() {
+  try {
+    me = await api("/api/login", "POST", {role: $("#lr").value, login_id: $("#li").value.trim(), password: $("#lp").value});
+    if (!meta.years.length) { try { meta = await api("/api/meta"); } catch (e) {} }
+    home();
+  } catch (e) { msg("lm", e.message); }
+}
+async function logout() { stopTimer(); try { await api("/api/logout", "POST"); } catch (e) {} me = null; loginView(); }
+
+/* ---------- shell ---------- */
+function home() {
+  stopTimer();
+  const label = {admin: "Admin", professor: "Professor", student: "Student"}[me.role];
+  $("#app").innerHTML = `<div class="bar"><span class="pill">${esc(me.name)} · ${label}</span>
+    <span><button class="ghost sm" onclick="pwView()">Change password</button> <button class="ghost sm" onclick="logout()">Sign out</button></span></div><div id="main"></div>`;
+  ({admin: adminView, professor: profView, student: studView})[me.role]();
+}
+
+/* ---------- change password (all roles) ---------- */
+function pwView() {
+  stopTimer();
+  $("#main").innerHTML = `<div class="card"><h2>Change password</h2>
+    <label>Current password</label><input id="op" type="password" autocomplete="current-password">
+    <label>New password (min 6 characters)</label><input id="np" type="password" autocomplete="new-password">
+    <label>Confirm new password</label><input id="cp" type="password" autocomplete="new-password">
+    <button onclick="doPw()">Update password</button> <button class="ghost" onclick="home()">Back</button>
+    <div id="pm" class="msg"></div></div>`;
+}
+async function doPw() {
+  if ($("#np").value !== $("#cp").value) return msg("pm", "New passwords do not match.");
+  try {
+    await api("/api/change-password", "POST", {old_password: $("#op").value, new_password: $("#np").value});
+    msg("pm", "Password updated.", true);
+    ["op","np","cp"].forEach(i => $("#" + i).value = "");
+  } catch (e) { msg("pm", e.message); }
+}
+
+/* ---------- admin ---------- */
+function adminView() {
+  $("#main").innerHTML = `<div class="tabs"><button id="t1" onclick="adminTab('tt')">Timetable</button><button id="t2" onclick="adminTab('us')">Users</button><button id="t3" onclick="adminTab('rp')">Reports</button></div><div id="tab"></div>`;
+  adminTab("tt");
+}
+function adminTab(t) {
+  ["tt","us","rp"].forEach((k, i) => $("#t" + (i + 1)).className = k === t ? "on" : "");
+  ({tt: ttTab, us: usTab, rp: rpTab})[t]();
+}
+function fail(e) { $("#tab").innerHTML = `<div class="card msg err">${esc(e.message)}</div>`; }
+function fillDiv(yid, did) { const y = $("#" + yid).value; $("#" + did).innerHTML = opts(meta.divs[y] || []); }
+
+async function ttTab() {
+  $("#tab").innerHTML = `<div class="card">Loading…</div>`;
+  let profs, slots;
+  try {
+    if (!meta.years.length) meta = await api("/api/meta");
+    [profs, slots] = await Promise.all([api("/api/admin/users?role=professor"), api("/api/admin/timetable")]);
+  } catch (e) { return fail(e); }
+  slots.sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || a.start.localeCompare(b.start));
+  $("#tab").innerHTML = `<div class="card"><h2>Add a timetable slot</h2>
+    <div class="row"><div><label>Day</label><select id="d">${opts(DAYS)}</select></div><div><label>Start</label><select id="s">${opts(TIMES, "09:00")}</select></div></div>
+    <label>End</label><select id="e">${opts(TIMES, "10:00")}</select>
+    <div class="row"><div><label>Year</label><select id="y" onchange="fillDiv('y','v')">${opts(meta.years)}</select></div><div><label>Division</label><select id="v"></select></div></div>
+    <label>Professor</label><select id="p">${profs.map(p => `<option value="${p.id}">${esc(p.name)} (${esc(p.login_id)})</option>`).join("")}</select>
+    <label>Subject</label><input id="sj" placeholder="e.g. Data Structures">
+    <button onclick="addSlot()">Add slot</button><div id="tm" class="msg"></div></div>
+    <div class="card"><h2>Weekly timetable</h2>${slots.length ? slots.map(t => `<div class="item"><span><b>${esc(t.day)}</b> ${esc(t.start)}–${esc(t.end)} · ${esc(t.year)} ${esc(t.div)}<br>${esc(t.subject)} · <span class="muted">${esc(t.professor_name || "—")}</span></span><button class="del" onclick="delSlot(${t.id})">Delete</button></div>`).join("") : `<p class="muted">No slots yet.</p>`}</div>`;
+  fillDiv("y", "v");
+}
+async function addSlot() {
+  const subject = $("#sj").value.trim();
+  if (!subject) return msg("tm", "Enter a subject.");
+  if ($("#e").value <= $("#s").value) return msg("tm", "End time must be after start time.");
+  if (!$("#p").value) return msg("tm", "Add a professor under Users first.");
+  try {
+    await api("/api/admin/timetable", "POST", {day: $("#d").value, start: $("#s").value, end: $("#e").value,
+      year: $("#y").value, div: $("#v").value, subject, professor_id: +$("#p").value});
+    ttTab();
+  } catch (e) { msg("tm", e.message); }
+}
+async function delSlot(id) { if (!confirm("Delete this slot?")) return; try { await api("/api/admin/timetable/" + id, "DELETE"); ttTab(); } catch (e) { msg("tm", e.message); } }
+
+async function usTab() {
+  $("#tab").innerHTML = `<div class="card">Loading…</div>`;
+  let users;
+  try { if (!meta.years.length) meta = await api("/api/meta"); users = await api("/api/admin/users"); } catch (e) { return fail(e); }
+  $("#tab").innerHTML = `<div class="card"><h2>Add a user</h2>
+    <label>Role</label><select id="ur" onchange="$('#sx').style.display=this.value==='student'?'block':'none'"><option value="student">Student</option><option value="professor">Professor</option></select>
+    <label>ID (roll no. / employee ID)</label><input id="ui" autocapitalize="off">
+    <label>Name</label><input id="un">
+    <div id="sx"><div class="row"><div><label>Year</label><select id="uy" onchange="fillDiv('uy','ud')">${opts(meta.years)}</select></div><div><label>Division</label><select id="ud"></select></div></div>
+    <label>GRN</label><input id="ug"></div>
+    <button onclick="addUser()">Add user</button><div id="um" class="msg"></div></div>
+    <div class="card"><h2>Users</h2>${users.length ? users.map(u => `<div class="item"><span><b>${esc(u.name)}</b> (${esc(u.login_id)})<br><span class="muted">${esc(u.role)}${u.year ? " · " + esc(u.year) + " " + esc(u.div) : ""}</span></span><span><button class="ghost sm" onclick="resetPw(${u.id})">Reset</button> <button class="del" onclick="delUser(${u.id})">Delete</button></span></div>`).join("") : `<p class="muted">No users.</p>`}</div>`;
+  fillDiv("uy", "ud");
+}
+async function addUser() {
+  const role = $("#ur").value, login_id = $("#ui").value.trim(), name = $("#un").value.trim();
+  if (!login_id || !name) return msg("um", "Enter ID and name.");
+  const body = {role, login_id, name};
+  if (role === "student") Object.assign(body, {year: $("#uy").value, div: $("#ud").value, grn: $("#ug").value.trim()});
+  try { await api("/api/admin/users", "POST", body); usTab(); } catch (e) { msg("um", e.message); }
+}
+async function resetPw(id) {
+  if (!confirm("Reset this user's password to their ID? They should change it after signing in.")) return;
+  try { await api("/api/admin/users/" + id + "/reset-password", "POST"); alert("Password reset to the user's ID."); } catch (e) { alert(e.message); }
+}
+async function delUser(id) { if (!confirm("Delete this user?")) return; try { await api("/api/admin/users/" + id, "DELETE"); usTab(); } catch (e) { alert(e.message); } }
+
+async function rpTab() {
+  $("#tab").innerHTML = `<div class="card">Loading…</div>`;
+  try { if (!meta.years.length) meta = await api("/api/meta"); } catch (e) { return fail(e); }
+  $("#tab").innerHTML = `<div class="card"><h2>Report filters</h2>
+    <div class="row"><div><label>Year</label><select id="ry" onchange="fillDiv('ry','rd');loadSubjects()">${opts(meta.years)}</select></div>
+    <div><label>Division</label><select id="rd" onchange="loadSubjects()"></select></div></div>
+    <label>Subject</label><select id="rsub"><option value="">All subjects</option></select>
+    <div class="row"><div><label>From date</label><input type="date" id="rf"></div><div><label>To date</label><input type="date" id="rt"></div></div>
+    <label>Show students</label><select id="rb"><option value="">All students</option><option value="75">Below 75%</option><option value="60">Below 60%</option><option value="50">Below 50%</option></select>
+    <button onclick="runReport()">Show report</button></div><div id="rout"></div>`;
+  fillDiv("ry", "rd");
+  loadSubjects();
+}
+function rpQuery(extra) {
+  const p = new URLSearchParams({year: $("#ry").value, div: $("#rd").value, subject: $("#rsub").value,
+    from: $("#rf").value, to: $("#rt").value, tz: new Date().getTimezoneOffset()});
+  for (const k in (extra || {})) p.set(k, extra[k]);
+  return p.toString();
+}
+async function loadSubjects() {
+  try {
+    const subs = await api("/api/admin/reports/subjects?year=" + encodeURIComponent($("#ry").value) + "&div=" + encodeURIComponent($("#rd").value));
+    $("#rsub").innerHTML = `<option value="">All subjects</option>` + subs.map(s => `<option>${esc(s)}</option>`).join("");
+  } catch (e) {}
+}
+function dl(kind) { location.href = "/api/admin/reports/" + kind + ".csv?" + rpQuery(kind === "students" ? {below: $("#rb").value} : {}); }
+async function runReport() {
+  $("#rout").innerHTML = `<div class="card">Loading…</div>`;
+  try {
+    const [st, se] = await Promise.all([
+      api("/api/admin/reports/students?" + rpQuery({below: $("#rb").value})),
+      api("/api/admin/reports/sessions?" + rpQuery())]);
+    $("#rout").innerHTML = `<div class="card"><h2>Student attendance</h2>
+      ${st.length ? `<table><tr><th>ID</th><th>Name</th><th>Att.</th><th>%</th></tr>${st.map(x => `<tr><td>${esc(x.login_id)}</td><td>${esc(x.name)}</td><td>${x.attended}/${x.total}</td><td style="${x.total && x.pct < 75 ? "color:#b3261e;font-weight:600" : ""}">${x.pct}%</td></tr>`).join("")}</table>` : `<p class="muted">No students match.</p>`}
+      <button class="ghost" onclick="dl('students')" style="margin-top:14px">Download CSV</button></div>
+      <div class="card"><h2>Sessions (${se.length})</h2>
+      ${se.length ? se.map(s => `<div style="border-top:1px solid #eef1f6;padding:10px 0"><div class="item" style="border:0;padding:0" onclick="sessDetail(${s.id})"><span><b>${esc(s.subject)}</b> · ${esc(s.year)} ${esc(s.div)}<br><span class="muted">${fmt(s.created_at)} · ${esc(s.professor)}</span></span><span>${s.present}/${s.total} ▾</span></div><div id="sd${s.id}"></div></div>`).join("") : `<p class="muted">No sessions match.</p>`}
+      <button class="ghost" onclick="dl('sessions')" style="margin-top:14px">Download CSV</button></div>`;
+  } catch (e) { $("#rout").innerHTML = `<div class="card msg err">${esc(e.message)}</div>`; }
+}
+async function sessDetail(id) {
+  const box = $("#sd" + id);
+  if (box.innerHTML) { box.innerHTML = ""; return; }
+  box.innerHTML = `<p class="muted">Loading…</p>`;
+  try {
+    const d = await api("/api/admin/reports/session/" + id);
+    const list = a => a.length ? a.map(x => `${esc(x.name)} (${esc(x.login_id)})`).join(", ") : "—";
+    box.innerHTML = `<p style="font-size:14px"><b class="on-dot">Present (${d.present.length}):</b> ${list(d.present)}</p><p style="font-size:14px"><b style="color:#b3261e">Absent (${d.absent.length}):</b> ${list(d.absent)}</p>`;
+  } catch (e) { box.innerHTML = `<p class="msg err">${esc(e.message)}</p>`; }
+}
+
+/* ---------- professor ---------- */
+async function profView() {
+  $("#main").innerHTML = `<div id="cur"></div><div class="card"><h2>My classes</h2><div id="as">Loading…</div></div><div class="card"><h2>Past sessions</h2><div id="hs"></div></div>`;
+  try {
+    asg = await api("/api/prof/assignments");
+    $("#as").innerHTML = asg.length ? asg.map((x, i) => `<div class="item"><span>${esc(x.subject)} · ${esc(x.year)} ${esc(x.div)}</span><button class="sm" onclick="startSess(${i})">Start</button></div>`).join("") : `<p class="muted">No classes assigned yet. Ask the admin to add you to the timetable.</p>`;
+  } catch (e) { $("#as").innerHTML = `<p class="msg err">${esc(e.message)}</p>`; }
+  await profRefresh();
+  timer = setInterval(profRefresh, 5000);
+}
+async function startSess(i) {
+  try { await api("/api/prof/session/start", "POST", asg[i]); profRefresh(); } catch (e) { alert(e.message); }
+}
+async function stopSess() { try { await api("/api/prof/session/stop", "POST"); profRefresh(); } catch (e) { alert(e.message); } }
+async function profRefresh() {
+  try {
+    const c = await api("/api/prof/session/current");
+    const h = await api("/api/prof/sessions");
+    $("#cur").innerHTML = c ? `<div class="card"><h2>Live: ${esc(c.subject)} · ${esc(c.year)} ${esc(c.div)}</h2>
+      <div class="muted" style="text-align:center">Show this code to the class (changes every 30 s)</div>
+      <div class="code">${esc(c.token)}</div>
+      <p><b>${c.roll.filter(r => r.present).length}</b> of ${c.roll.length} present</p>
+      ${c.roll.map(r => `<div class="item"><span>${esc(r.name)} <span class="muted">(${esc(r.login_id)})</span></span><span class="${r.present ? "on-dot" : "muted"}">${r.present ? "Present" : "—"}</span></div>`).join("")}
+      <button class="del" onclick="stopSess()" style="margin-top:14px">Stop session</button></div>` : "";
+    $("#hs").innerHTML = h.length ? h.map(s => `<div class="item"><span><b>${esc(s.subject)}</b> · ${esc(s.year)} ${esc(s.div)}<br><span class="muted">${fmt(s.created_at)}</span></span><span>${s.present} present</span></div>`).join("") : `<p class="muted">No sessions yet.</p>`;
+  } catch (e) {}
+}
+
+/* ---------- student ---------- */
+async function studView() {
+  $("#main").innerHTML = `<div class="card"><h2>Today</h2><div id="ti">Loading…</div>
+    <div id="mk" style="display:none"><label>Enter the code shown by your professor</label>
+    <input id="cd" autocapitalize="characters" maxlength="10" style="text-transform:uppercase;letter-spacing:4px;text-align:center;font-size:22px">
+    <button onclick="markIt()">Mark present</button></div><div id="mm" class="msg"></div></div>
+    <div class="card"><h2>My attendance</h2><div id="st"></div></div>`;
+  await studRefresh();
+  timer = setInterval(studRefresh, 8000);
+}
+async function studRefresh() {
+  try {
+    const t = await api("/api/student/today");
+    if (!t.slot) { $("#ti").innerHTML = `<p class="muted">No class right now.</p>`; $("#mk").style.display = "none"; }
+    else {
+      $("#ti").innerHTML = `<p><b>${esc(t.slot.subject)}</b><br><span class="muted">${esc(t.slot.start)}–${esc(t.slot.end)}</span></p>` +
+        (t.marked ? `<p class="msg ok">You are marked present ✓</p>` : t.session_open ? `<p>Session is live.</p>` : `<p class="muted">Waiting for the professor to start the session…</p>`);
+      $("#mk").style.display = t.session_open && !t.marked ? "block" : "none";
+    }
+    const s = await api("/api/student/stats");
+    $("#st").innerHTML = `<p style="font-size:28px;margin:0"><b>${s.pct}%</b></p><p class="muted">${s.attended} of ${s.total} sessions attended</p>`;
+  } catch (e) {}
+}
+async function markIt() {
+  try { await api("/api/student/mark", "POST", {code: $("#cd").value}); msg("mm", "Marked present ✓", true); $("#cd").value = ""; studRefresh(); }
+  catch (e) { msg("mm", e.message); }
+}
+
+boot();
+</script>
+</body>
+</html>
